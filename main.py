@@ -3,9 +3,22 @@ import requests
 import asyncio
 import subprocess
 import re
+import threading
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from vars import API_ID, API_HASH, BOT_TOKEN
+
+# Flask app for Render health check
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return 'Bot is running!'
+
+@app.route('/health')
+def health():
+    return 'OK'
 
 # Standalone Bot Configuration
 # Uses your existing credentials from vars.py
@@ -162,5 +175,15 @@ async def quality_handler(client, m: Message):
     await m.reply_text("🎯 **Batch processing complete!**")
 
 
+def run_flask():
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
+
 if __name__ == "__main__":
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Run the bot
     bot.run()
