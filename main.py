@@ -3,8 +3,8 @@ import requests
 import asyncio
 import subprocess
 import re
-from pyrofork import Client, filters
-from pyrofork.types import Message
+from pyrogram import Client, filters
+from pyrogram.types import Message
 from vars import API_ID, API_HASH, BOT_TOKEN
 
 # Standalone Bot Configuration

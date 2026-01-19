@@ -1,6 +1,5 @@
-pyrofork==2.2.11
+pyrogram==2.0.106
 tgcrypto==1.2.5
-pyromod==1.5.0
 requests==2.31.0
 yt-dlp==2025.06.30
 aiohttp
