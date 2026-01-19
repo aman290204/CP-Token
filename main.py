@@ -3,17 +3,17 @@ import requests
 import asyncio
 import subprocess
 import re
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrofork import Client, filters
+from pyrofork.types import Message
 from vars import API_ID, API_HASH, BOT_TOKEN
 
 # Standalone Bot Configuration
 # Uses your existing credentials from vars.py
 bot = Client(
-    "standalone_token_bot",
+    "token_bot_v2",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN.strip()
 )
 
 # In-memory storage for user session
