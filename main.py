@@ -163,19 +163,80 @@ def duration(filename):
     except:
         return 0
 
-# ===== DOWNLOAD FUNCTION (same as original) =====
+# ===== DOWNLOAD FUNCTION WITH PROGRESS =====
 
-async def download_video(url, cmd, name):
-    """Same download function as original - uses aria2c with 16 connections"""
+async def download_video(url, cmd, name, prog_msg=None):
+    """Download with progress updates using yt-dlp output parsing"""
     retry_count = 0
     max_retries = 2
+    last_update = time.time()
 
     while retry_count < max_retries:
-        download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
+        download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32" --newline --progress'
         print(download_cmd)
-        k = subprocess.run(download_cmd, shell=True)
-        if k.returncode == 0:
+        
+        process = subprocess.Popen(download_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        
+        for line in process.stdout:
+            if prog_msg and '[download]' in line and '%' in line:
+                try:
+                    # Only update every 5 seconds to avoid flood
+                    if time.time() - last_update < 5:
+                        continue
+                    last_update = time.time()
+                    
+                    parts = line.strip().split()
+                    
+                    # Extract percentage
+                    percent_str = [p for p in parts if '%' in p]
+                    if percent_str:
+                        percent = float(percent_str[0].replace('%', ''))
+                    else:
+                        continue
+                    
+                    # Extract size and speed
+                    size = "N/A"
+                    processed = "N/A"
+                    speed = "N/A"
+                    eta = "N/A"
+                    
+                    for j, p in enumerate(parts):
+                        if 'MiB' in p or 'GiB' in p or 'KiB' in p:
+                            if j > 0 and 'of' in parts[j-1]:
+                                size = p
+                            else:
+                                processed = p
+                        if '/s' in p:
+                            speed = p
+                        if 'ETA' in p and j+1 < len(parts):
+                            eta = parts[j+1]
+                    
+                    # Create progress bar
+                    bar_length = 12
+                    filled = int(percent / 8.33)
+                    progress_bar_str = "🔲" * filled + "◻️" * (bar_length - filled)
+                    
+                    msg = (
+                        f"╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯\n"
+                        f"├  **{percent:.1f}%** `{progress_bar_str}`\n├\n"
+                        f"├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ | {speed} \n"
+                        f"├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ | {processed} \n"
+                        f"├ 📦  𝗦𝗜𝗭𝗘 ➤ | {size} \n"
+                        f"├ ⏰  𝗘𝗧𝗔 ➤ | {eta}\n\n"
+                        f"╰─═══ ** 𝐂𝐥𝐚𝐬𝐬𝐩𝐥𝐮𝐬 𝐁𝐨𝐭 **═══─╯"
+                    )
+                    
+                    try:
+                        await prog_msg.edit(msg)
+                    except:
+                        pass
+                except:
+                    pass
+        
+        process.wait()
+        if process.returncode == 0:
             break
+        
         retry_count += 1
         print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 5s...")
         await asyncio.sleep(5)
@@ -442,7 +503,7 @@ async def quality_handler(client, m: Message):
                     prog = await bot.send_message(channel_id, Show, disable_web_page_preview=True)
                     
                     cmd = f'yt-dlp -f "{ytf}" -o "{name}.mp4" "{signed_url}"'
-                    filename = await download_video(signed_url, cmd, f"{name}.mp4")
+                    filename = await download_video(signed_url, cmd, f"{name}.mp4", prog)
                     
                     if os.path.exists(filename):
                         await send_vid(bot, m, cc, filename, "/d", name, prog, channel_id)
@@ -464,7 +525,7 @@ async def quality_handler(client, m: Message):
                 prog = await bot.send_message(channel_id, Show, disable_web_page_preview=True)
                 
                 cmd = f'yt-dlp -f "{ytf}" -o "{name}.mp4" "{url}"'
-                filename = await download_video(url, cmd, f"{name}.mp4")
+                filename = await download_video(url, cmd, f"{name}.mp4", prog)
                 
                 if os.path.exists(filename):
                     await send_vid(bot, m, cc, filename, "/d", name, prog, channel_id)
