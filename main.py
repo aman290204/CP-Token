@@ -21,7 +21,6 @@ def health():
     return 'OK'
 
 # Standalone Bot Configuration
-# Uses your existing credentials from vars.py
 bot = Client(
     "token_bot_v2",
     api_id=API_ID,
@@ -35,40 +34,16 @@ user_data = {}
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
-async def fetch_content(token, batch_id):
-    """
-    Attempts to fetch content list from Classplus.
-    Includes common endpoints used by Classplus.
-    """
-    headers = {
-        'x-access-token': token,
-        'api-version': '18',
-        'region': 'IN'
-    }
-    
-    # Try multiple common endpoints
-    endpoints = [
-        f'https://api.classplusapp.com/v2/course/content/get-batch-content-details?batchId={batch_id}&limit=1000',
-        f'https://api.classplusapp.com/v2/course/content/get-course-content-by-batch-id?batchId={batch_id}',
-        f'https://api.classplusapp.com/v2/batches/{batch_id}/hierarchy'
-    ]
-    
-    for url in endpoints:
-        try:
-            resp = requests.get(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                # Classplus typically returns a list of items in 'data' or 'items'
-                items = data.get('data', {}).get('items', []) or data.get('items', [])
-                if items:
-                    return items
-        except Exception:
-            continue
-    return None
-
 @bot.on_message(filters.command("start"))
 async def start_handler(client, m: Message):
-    await m.reply_text("👋 **Welcome to Standalone Token Bot!**\n\nI can fetch and download Classplus content automatically.\n\nSend /token followed by your JWT token to begin.")
+    await m.reply_text(
+        "👋 **Welcome to Classplus Token Bot!**\n\n"
+        "I can download Classplus content using your token.\n\n"
+        "**Commands:**\n"
+        "1️⃣ `/token your_jwt_token` - Set your Classplus token\n"
+        "2️⃣ Send a `.txt` file with video/PDF links\n"
+        "3️⃣ Choose quality and I'll download everything!"
+    )
 
 @bot.on_message(filters.command("token"))
 async def token_handler(client, m: Message):
@@ -77,102 +52,148 @@ async def token_handler(client, m: Message):
     
     token = m.text.split(None, 1)[1].strip()
     user_data[m.from_user.id] = {"token": token}
-    await m.reply_text("✅ Token saved! Now send /batch followed by the Batch ID.")
+    await m.reply_text("✅ Token saved!\n\nNow send me a `.txt` file containing video/PDF links.")
 
-@bot.on_message(filters.command("batch"))
-async def batch_handler(client, m: Message):
+@bot.on_message(filters.document)
+async def txt_handler(client, m: Message):
     user_id = m.from_user.id
+    
+    # Check if it's a txt file
+    if not m.document.file_name.endswith('.txt'):
+        return await m.reply_text("❌ Please send a `.txt` file with links.")
+    
+    # Check if token is set
     if user_id not in user_data or "token" not in user_data[user_id]:
-        return await m.reply_text("❌ Please set your token first using /token")
+        return await m.reply_text("❌ Please set your token first using `/token your_token`")
     
-    if len(m.command) < 2:
-        return await m.reply_text("❌ Please provide Batch ID: `/batch 777056`")
-    
-    batch_id = m.command[1]
     token = user_data[user_id]["token"]
     
-    editable = await m.reply_text(f"🔍 Fetching content for Batch `{batch_id}`...")
+    # Download the txt file
+    editable = await m.reply_text("📥 Downloading file...")
+    file_path = await m.download()
     
-    items = await fetch_content(token, batch_id)
-    if not items:
-        return await editable.edit("⚠️ Failed to fetch content automatically. Classplus API structure might be different for this organization.")
+    # Read links from file
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
     
-    user_data[user_id]["items"] = items
-    user_data[user_id]["batch_id"] = batch_id
+    os.remove(file_path)
     
-    await editable.edit("🎞️ **Enter Resolution**\n\n╭━━⪼ `worst`\n┣━━⪼ `144`\n┣━━⪼ `240`\n┣━━⪼ `360`\n┣━━⪼ `480`\n┣━━⪼ `720`\n╰━━⪼ `1080`\n\nSend the number (e.g., `480`) or `worst`.")
+    # Parse links
+    lines = content.strip().split('\n')
+    links = []
+    current_name = "Untitled"
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("Name:"):
+            current_name = line.replace("Name:", "").strip()
+        elif line.startswith("http") or line.startswith("https"):
+            links.append({"name": current_name, "url": line})
+    
+    if not links:
+        return await editable.edit("❌ No valid links found in the file.")
+    
+    user_data[user_id]["links"] = links
+    
+    await editable.edit(
+        f"✅ Found **{len(links)}** links!\n\n"
+        "🎞️ **Enter Resolution:**\n\n"
+        "╭━━⪼ `worst`\n"
+        "┣━━⪼ `144`\n"
+        "┣━━⪼ `240`\n"
+        "┣━━⪼ `360`\n"
+        "┣━━⪼ `480`\n"
+        "┣━━⪼ `720`\n"
+        "╰━━⪼ `1080`\n\n"
+        "Send the number (e.g., `480`) or `worst`."
+    )
 
-@bot.on_message(filters.text & ~filters.command(["start", "token", "batch"]))
+@bot.on_message(filters.text & ~filters.command(["start", "token"]))
 async def quality_handler(client, m: Message):
     user_id = m.from_user.id
-    if user_id not in user_data or "items" not in user_data[user_id]:
+    if user_id not in user_data or "links" not in user_data[user_id]:
         return
 
     quality = m.text.strip().lower()
-    items = user_data[user_id]["items"]
+    links = user_data[user_id]["links"]
     token = user_data[user_id]["token"]
     
     # Selection of yt-dlp format
     if quality == "worst":
         ytf = "worst"
-    else:
-        # standard extraction: b[height<=720]/...
+    elif quality.isdigit():
         ytf = f"b[height<={quality}]/bv[height<={quality}]+ba/b/bv+ba"
-        if not quality.isdigit():
-             ytf = "best" # fallback
+    else:
+        ytf = "best"
              
-    await m.reply_text(f"🚀 Starting download of {len(items)} items at **{quality}** quality...")
+    await m.reply_text(f"🚀 Starting download of {len(links)} items at **{quality}** quality...")
     
-    for item in items:
-        name = item.get('name', 'Untitled')
-        url = item.get('url') or item.get('contentUrl')
+    for i, item in enumerate(links, 1):
+        name = item.get('name', f'Video_{i}')
+        url = item.get('url', '')
         
         if not url:
             continue
+        
+        await m.reply_text(f"📥 [{i}/{len(links)}] Processing: {name}")
             
         # PDF Download
-        if ".pdf" in url:
+        if ".pdf" in url.lower():
             file_name = f"{sanitize_filename(name)}.pdf"
             try:
-                resp = requests.get(url)
+                resp = requests.get(url, timeout=60)
                 with open(file_name, "wb") as f:
                     f.write(resp.content)
                 await m.reply_document(file_name, caption=f"📄 {name}")
                 os.remove(file_name)
             except Exception as e:
-                await m.reply_text(f"❌ Error downloading PDF {name}: {str(e)}")
+                await m.reply_text(f"❌ Error downloading PDF: {str(e)}")
             
         # Video Download (using AANT API for signing)
-        elif "m3u8" in url or "mpd" in url:
+        elif "m3u8" in url or "mpd" in url or "classplusapp" in url:
             # Normalize for AANT
             url_norm = url.replace("https://cpvod.testbook.com/", "https://media-cdn.classplusapp.com/drm/")
             api_call = f"https://cp-api-by-aman.vercel.app/AANT?url={url_norm}&token={token}"
             
             try:
-                resp = requests.get(api_call)
+                resp = requests.get(api_call, timeout=30)
                 if resp.status_code == 200:
                     data = resp.json()
-                    signed_url = data.get('url') or data.get('MPD')
+                    signed_url = data.get('url') or data.get('MPD') or data.get('m3u8')
                     if signed_url:
                         file_name = f"{sanitize_filename(name)}.mp4"
                         cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" "{signed_url}"'
-                        subprocess.run(cmd, shell=True)
+                        subprocess.run(cmd, shell=True, timeout=600)
                         
                         if os.path.exists(file_name):
                             await m.reply_video(file_name, caption=f"🎥 {name}")
                             os.remove(file_name)
                         else:
-                            await m.reply_text(f"❌ Failed to download video: {name}")
+                            await m.reply_text(f"❌ Failed to download: {name}")
                     else:
-                        await m.reply_text(f"⚠️ API did not return a valid URL for: {name}")
+                        await m.reply_text(f"⚠️ API did not return URL for: {name}")
                 else:
-                    await m.reply_text(f"⚠️ API error ({resp.status_code}) for: {name}")
+                    await m.reply_text(f"⚠️ API error ({resp.status_code}): {name}")
             except Exception as e:
-                await m.reply_text(f"❌ Error processing video {name}: {str(e)}")
+                await m.reply_text(f"❌ Error: {str(e)}")
+        
+        # Direct video URL
+        elif any(ext in url.lower() for ext in ['.mp4', '.mkv', '.webm']):
+            file_name = f"{sanitize_filename(name)}.mp4"
+            try:
+                cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" "{url}"'
+                subprocess.run(cmd, shell=True, timeout=600)
+                if os.path.exists(file_name):
+                    await m.reply_video(file_name, caption=f"🎥 {name}")
+                    os.remove(file_name)
+            except Exception as e:
+                await m.reply_text(f"❌ Error: {str(e)}")
 
-    # Clear items to prevent re-processing on random text
-    del user_data[user_id]["items"]
-    await m.reply_text("🎯 **Batch processing complete!**")
+    # Clear links to prevent re-processing
+    del user_data[user_id]["links"]
+    await m.reply_text("🎯 **All downloads complete!**")
 
 
 def run_flask():
