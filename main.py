@@ -34,6 +34,37 @@ user_data = {}
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
+def create_progress_bar(percentage):
+    """Create a visual progress bar"""
+    filled = int(percentage / 8.33)  # 12 blocks total
+    empty = 12 - filled
+    bar = "◼️" * filled + "◻️" * empty
+    return bar
+
+def format_size(size_bytes):
+    """Format bytes to human readable"""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes/1024:.2f}KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes/(1024*1024):.2f}MB"
+    else:
+        return f"{size_bytes/(1024*1024*1024):.2f}GB"
+
+def get_progress_message(percentage, speed, processed, total, eta):
+    """Create fancy progress message"""
+    bar = create_progress_bar(percentage)
+    return f"""╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯
+├  {percentage:.1f}% {bar}
+├
+├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ | {speed}
+├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ | {processed}
+├ 📦  𝗦𝗜𝗭𝗘 ➤ | {total}
+├ ⏰  𝗘𝗧𝗔 ➤ | {eta}
+├
+╰─═══  𝐂𝐥𝐚𝐬𝐬𝐩𝐥𝐮𝐬 𝐁𝐨𝐭 ═══─╯"""
+
 @bot.on_message(filters.command("start"))
 async def start_handler(client, m: Message):
     await m.reply_text(
@@ -41,8 +72,9 @@ async def start_handler(client, m: Message):
         "I can download Classplus content using your token.\n\n"
         "**Commands:**\n"
         "1️⃣ `/token your_jwt_token` - Set your Classplus token\n"
-        "2️⃣ Send a `.txt` file with video/PDF links\n"
-        "3️⃣ Choose quality and I'll download everything!"
+        "2️⃣ `/batch BatchName` - Set batch name for captions\n"
+        "3️⃣ Send a `.txt` file with video/PDF links\n"
+        "4️⃣ Choose quality and I'll download everything!"
     )
 
 @bot.on_message(filters.command("token"))
@@ -52,7 +84,20 @@ async def token_handler(client, m: Message):
     
     token = m.text.split(None, 1)[1].strip()
     user_data[m.from_user.id] = {"token": token}
-    await m.reply_text("✅ Token saved!\n\nNow send me a `.txt` file containing video/PDF links.")
+    await m.reply_text("✅ Token saved!\n\nNow use `/batch BatchName` to set batch name, then send a `.txt` file.")
+
+@bot.on_message(filters.command("batch"))
+async def batch_handler(client, m: Message):
+    user_id = m.from_user.id
+    if user_id not in user_data:
+        return await m.reply_text("❌ Please set your token first using `/token`")
+    
+    if len(m.command) < 2:
+        return await m.reply_text("❌ Please provide batch name: `/batch PSI Rapid Revision`")
+    
+    batch_name = m.text.split(None, 1)[1].strip()
+    user_data[user_id]["batch_name"] = batch_name
+    await m.reply_text(f"✅ Batch name set to: **{batch_name}**\n\nNow send me a `.txt` file containing video/PDF links.")
 
 @bot.on_message(filters.document)
 async def txt_handler(client, m: Message):
@@ -127,7 +172,7 @@ async def txt_handler(client, m: Message):
         "Send the number (e.g., `480`) or `worst`."
     )
 
-@bot.on_message(filters.text & ~filters.command(["start", "token"]))
+@bot.on_message(filters.text & ~filters.command(["start", "token", "batch"]))
 async def quality_handler(client, m: Message):
     user_id = m.from_user.id
     if user_id not in user_data or "links" not in user_data[user_id]:
@@ -136,6 +181,7 @@ async def quality_handler(client, m: Message):
     quality = m.text.strip().lower()
     links = user_data[user_id]["links"]
     token = user_data[user_id]["token"]
+    batch_name = user_data[user_id].get("batch_name", "Classplus Batch")
     
     # Selection of yt-dlp format
     if quality == "worst":
@@ -146,6 +192,16 @@ async def quality_handler(client, m: Message):
         ytf = "best"
              
     await m.reply_text(f"🚀 Starting download of {len(links)} items at **{quality}** quality...")
+    
+    def get_caption(index, title, is_video=True):
+        icon = "🎞️" if is_video else "📄"
+        return f"""🏷️ Iɴᴅᴇx ID  : {str(index).zfill(3)}
+
+{icon}  Tɪᴛʟᴇ : {title}
+
+📚  𝗕ᴀᴛᴄʜ : {batch_name}
+
+🎓  Uᴘʟᴏᴀᴅ Bʏ : Classplus Bot"""
     
     for i, item in enumerate(links, 1):
         name = item.get('name', f'Video_{i}')
@@ -163,7 +219,7 @@ async def quality_handler(client, m: Message):
                 resp = requests.get(url, timeout=60)
                 with open(file_name, "wb") as f:
                     f.write(resp.content)
-                await m.reply_document(file_name, caption=f"📄 {name}")
+                await m.reply_document(file_name, caption=get_caption(i, name, is_video=False))
                 os.remove(file_name)
             except Exception as e:
                 await m.reply_text(f"❌ Error downloading PDF: {str(e)}")
@@ -181,12 +237,62 @@ async def quality_handler(client, m: Message):
                     signed_url = data.get('url') or data.get('MPD') or data.get('m3u8')
                     if signed_url:
                         file_name = f"{sanitize_filename(name)}.mp4"
-                        cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" "{signed_url}"'
-                        subprocess.run(cmd, shell=True, timeout=600)
+                        
+                        # Create progress message
+                        progress_msg = await m.reply_text(get_progress_message(0, "0MB/s", "0MB", "Calculating...", "Calculating..."))
+                        
+                        # Run yt-dlp with progress
+                        cmd = f'yt-dlp -f "{ytf}" --newline --progress -o "{file_name}" "{signed_url}"'
+                        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                        
+                        last_update = 0
+                        for line in process.stdout:
+                            if '[download]' in line and '%' in line:
+                                try:
+                                    # Parse progress info
+                                    parts = line.strip().split()
+                                    percent_str = [p for p in parts if '%' in p][0]
+                                    percentage = float(percent_str.replace('%', ''))
+                                    
+                                    # Get size and speed if available
+                                    size = "N/A"
+                                    speed = "N/A"
+                                    eta = "N/A"
+                                    processed = "N/A"
+                                    
+                                    for j, p in enumerate(parts):
+                                        if 'MiB' in p or 'GiB' in p or 'KiB' in p:
+                                            if j > 0 and 'of' in parts[j-1]:
+                                                size = p
+                                            else:
+                                                processed = p
+                                        if '/s' in p:
+                                            speed = p
+                                        if 'ETA' in p and j+1 < len(parts):
+                                            eta = parts[j+1]
+                                    
+                                    # Update message every 10%
+                                    if percentage - last_update >= 10:
+                                        last_update = percentage
+                                        try:
+                                            await progress_msg.edit_text(get_progress_message(percentage, speed, processed, size, eta))
+                                        except:
+                                            pass
+                                except:
+                                    pass
+                        
+                        process.wait()
+                        
+                        # Final update
+                        try:
+                            await progress_msg.edit_text(get_progress_message(100, "Done", "Complete", "Complete", "0s"))
+                        except:
+                            pass
                         
                         if os.path.exists(file_name):
-                            await m.reply_video(file_name, caption=f"🎥 {name}")
+                            await m.reply_video(file_name, caption=get_caption(i, name, is_video=True))
                             os.remove(file_name)
+                            await progress_msg.delete()
                         else:
                             await m.reply_text(f"❌ Failed to download: {name}")
                     else:
@@ -203,7 +309,7 @@ async def quality_handler(client, m: Message):
                 cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" "{url}"'
                 subprocess.run(cmd, shell=True, timeout=600)
                 if os.path.exists(file_name):
-                    await m.reply_video(file_name, caption=f"🎥 {name}")
+                    await m.reply_video(file_name, caption=get_caption(i, name, is_video=True))
                     os.remove(file_name)
             except Exception as e:
                 await m.reply_text(f"❌ Error: {str(e)}")
