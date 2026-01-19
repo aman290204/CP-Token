@@ -241,8 +241,8 @@ async def quality_handler(client, m: Message):
                         # Create progress message
                         progress_msg = await m.reply_text(get_progress_message(0, "0MB/s", "0MB", "Calculating...", "Calculating..."))
                         
-                        # Run yt-dlp with progress
-                        cmd = f'yt-dlp -f "{ytf}" --newline --progress -o "{file_name}" "{signed_url}"'
+                        # Run yt-dlp with aria2c for FAST downloads (16 connections)
+                        cmd = f'yt-dlp -f "{ytf}" --newline --progress --external-downloader aria2c --external-downloader-args "-x 16 -s 16 -k 1M" -o "{file_name}" "{signed_url}"'
                         process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                         
                         last_update = 0
@@ -306,7 +306,7 @@ async def quality_handler(client, m: Message):
         elif any(ext in url.lower() for ext in ['.mp4', '.mkv', '.webm']):
             file_name = f"{sanitize_filename(name)}.mp4"
             try:
-                cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" "{url}"'
+                cmd = f'yt-dlp -f "{ytf}" --external-downloader aria2c --external-downloader-args "-x 16 -s 16 -k 1M" -o "{file_name}" "{url}"'
                 subprocess.run(cmd, shell=True, timeout=600)
                 if os.path.exists(file_name):
                     await m.reply_video(file_name, caption=get_caption(i, name, is_video=True))
