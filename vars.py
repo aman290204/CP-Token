@@ -2,9 +2,9 @@ import os
 from os import environ
 
 # API Configuration
-API_ID = int(os.environ.get("API_ID", "22117815"))
-API_HASH = os.environ.get("API_HASH", "f78352d2ffdf2082f1d5a627ec1cf542")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8530004520:AAHjbfR4mubkZsCB6l4jV64IH0tpEzjC2x4")
+API_ID = int(os.environ.get("API_ID", "22117815").strip())
+API_HASH = os.environ.get("API_HASH", "f78352d2ffdf2082f1d5a627ec1cf542").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8530004520:AAHjbfR4mubkZsCB6l4jV64IH0tpEzjC2x4").strip()
 
 CREDIT = os.environ.get("CREDIT", "𝐈𝐓'𝐬𝐆𝐎𝐋𝐔")
 # MongoDB Configuration
