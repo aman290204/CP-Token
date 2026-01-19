@@ -1,0 +1,9 @@
+pyrofork
+tgcrypto
+requests
+yt-dlp
+aiohttp
+aiofiles
+pyromod
+python-dotenv
+gunicorn
