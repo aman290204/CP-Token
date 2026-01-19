@@ -1,12 +1,14 @@
+# Standalone Token Bot - Uses same patterns as original ITsGOLU bot
 import os
 import re
 import time
 import subprocess
 import threading
+import asyncio
+import aiohttp
+import aiofiles
 import requests
-import logging
 from flask import Flask
-from math import ceil
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
@@ -23,18 +25,21 @@ def home():
 def health():
     return 'OK'
 
-# Bot Configuration
+# Bot Client - same config as original
 bot = Client(
     "token_bot_v2",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN.strip()
+    bot_token=BOT_TOKEN.strip() if isinstance(BOT_TOKEN, str) else BOT_TOKEN,
+    workers=300,
+    sleep_threshold=60,
+    in_memory=True
 )
 
-# In-memory storage
+# User session storage
 user_data = {}
 
-# ==================== UTILS FROM ORIGINAL BOT ====================
+# ===== UTILITY FUNCTIONS (from original utils.py) =====
 
 class Timer:
     def __init__(self, time_between=5):
@@ -65,24 +70,31 @@ def hrt(seconds, precision=0):
     pieces = []
     from datetime import timedelta
     value = timedelta(seconds=seconds)
+
     if value.days:
         pieces.append(f"{value.days}d")
+
     seconds = value.seconds
     if seconds >= 3600:
         hours = int(seconds / 3600)
         pieces.append(f"{hours}h")
         seconds -= hours * 3600
+
     if seconds >= 60:
         minutes = int(seconds / 60)
         pieces.append(f"{minutes}m")
         seconds -= minutes * 60
+
     if seconds > 0 or not pieces:
         pieces.append(f"{seconds}s")
+
     if not precision:
         return "".join(pieces)
+
     return "".join(pieces[:precision])
 
 async def progress_bar(current, total, reply, start):
+    """Same progress bar as original bot"""
     if not timer.can_send():
         return
 
@@ -92,7 +104,7 @@ async def progress_bar(current, total, reply, start):
         return
 
     base_speed = current / elapsed
-    speed = base_speed + (9 * 1024 * 1024)  # +9 MB/s boost
+    speed = base_speed + (9 * 1024 * 1024)  # +9 MB/s boost display
 
     percent = (current / total) * 100
     eta_seconds = (total - current) / speed if speed > 0 else 0
@@ -127,7 +139,7 @@ async def progress_bar(current, total, reply, start):
         f"├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ | {hrb(current)} \n"
         f"├ 📦  𝗦𝗜𝗭𝗘 ➤ | {hrb(total)} \n"
         f"├ ⏰  𝗘𝗧𝗔 ➤ | {hrt(eta_seconds, 1)}\n\n"
-        f"╰─═══ ** {CREDIT} **═══─╯"
+        f"╰─═══ ** 𝐂𝐥𝐚𝐬𝐬𝐩𝐥𝐮𝐬 𝐁𝐨𝐭 **═══─╯"
     )
 
     try:
@@ -141,56 +153,20 @@ def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 def duration(filename):
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                             "format=duration", "-of",
-                             "default=noprint_wrappers=1:nokey=1", filename],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT)
     try:
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                 "format=duration", "-of",
+                                 "default=noprint_wrappers=1:nokey=1", filename],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT)
         return float(result.stdout)
     except:
         return 0
 
-def get_duration(filename):
-    return duration(filename)
-
-def split_large_video(file_path, max_size_mb=1900):
-    size_bytes = os.path.getsize(file_path)
-    max_bytes = max_size_mb * 1024 * 1024
-
-    if size_bytes <= max_bytes:
-        return [file_path]
-
-    dur = get_duration(file_path)
-    parts = ceil(size_bytes / max_bytes)
-    part_duration = dur / parts
-    base_name = file_path.rsplit(".", 1)[0]
-    output_files = []
-
-    for i in range(parts):
-        output_file = f"{base_name}_part{i+1}.mp4"
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", file_path,
-            "-ss", str(int(part_duration * i)),
-            "-t", str(int(part_duration)),
-            "-c", "copy",
-            output_file
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(output_file):
-            output_files.append(output_file)
-
-    return output_files
-
-def human_readable_size(size, decimal_places=2):
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
-        if size < 1024.0 or unit == 'PB':
-            break
-        size /= 1024.0
-    return f"{size:.{decimal_places}f} {unit}"
+# ===== DOWNLOAD FUNCTION (same as original) =====
 
 async def download_video(url, cmd, name):
+    """Same download function as original - uses aria2c with 16 connections"""
     retry_count = 0
     max_retries = 2
 
@@ -201,8 +177,8 @@ async def download_video(url, cmd, name):
         if k.returncode == 0:
             break
         retry_count += 1
-        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying...")
-        time.sleep(5)
+        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 5s...")
+        await asyncio.sleep(5)
 
     try:
         if os.path.isfile(name):
@@ -220,102 +196,67 @@ async def download_video(url, cmd, name):
     except:
         return name
 
-async def send_vid(bot, m, cc, filename, thumb, name, prog):
-    try:
-        temp_thumb = None
-        thumbnail = thumb
+# ===== SEND VIDEO FUNCTION (same as original) =====
 
-        if thumb in ["/d", "no"] or not os.path.exists(str(thumb)):
-            temp_thumb = f"thumb_{os.path.basename(filename)}.jpg"
-            subprocess.run(
-                f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 -q:v 2 -y "{temp_thumb}"',
-                shell=True
-            )
-            thumbnail = temp_thumb if os.path.exists(temp_thumb) else None
+async def send_vid(bot, m, cc, filename, thumb, name, prog, channel_id):
+    """Same send_vid as original bot with progress callback"""
+    try:
+        thumbnail = None
+        temp_thumb = f"downloads/thumb_{os.path.basename(filename)}.jpg"
+        
+        # Generate thumbnail
+        os.makedirs("downloads", exist_ok=True)
+        subprocess.run(
+            f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 -q:v 2 -y "{temp_thumb}"',
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if os.path.exists(temp_thumb):
+            thumbnail = temp_thumb
 
         await prog.delete(True)
-        reply = await m.reply_text(f"📤 **Uploading:**\n<blockquote>{name}</blockquote>")
 
-        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+        reply1 = await bot.send_message(channel_id, f" **Uploading Video:**\n<blockquote>{name}</blockquote>")
+        reply = await m.reply_text(f"🖼 **Generating Thumbnail:**\n<blockquote>{name}</blockquote>")
 
-        if file_size_mb < 2000:
-            dur = int(duration(filename))
-            start_time = time.time()
+        dur = int(duration(filename))
+        start_time = time.time()
 
-            try:
-                sent_message = await bot.send_video(
-                    chat_id=m.chat.id,
-                    video=filename,
-                    caption=cc,
-                    supports_streaming=True,
-                    height=720,
-                    width=1280,
-                    thumb=thumbnail,
-                    duration=dur,
-                    progress=progress_bar,
-                    progress_args=(reply, start_time)
-                )
-            except:
-                sent_message = await bot.send_document(
-                    chat_id=m.chat.id,
-                    document=filename,
-                    caption=cc,
-                    progress=progress_bar,
-                    progress_args=(reply, start_time)
-                )
-
-            if os.path.exists(filename):
-                os.remove(filename)
-            await reply.delete(True)
-
-        else:
-            notify_split = await m.reply_text(
-                f"⚠️ Video larger than 2GB ({human_readable_size(os.path.getsize(filename))})\n"
-                f"⏳ Splitting into parts..."
+        try:
+            sent_message = await bot.send_video(
+                chat_id=channel_id,
+                video=filename,
+                caption=cc,
+                supports_streaming=True,
+                height=720,
+                width=1280,
+                thumb=thumbnail,
+                duration=dur,
+                progress=progress_bar,
+                progress_args=(reply, start_time)
             )
-            parts = split_large_video(filename)
+        except Exception:
+            sent_message = await bot.send_document(
+                chat_id=channel_id,
+                document=filename,
+                caption=cc,
+                progress=progress_bar,
+                progress_args=(reply, start_time)
+            )
 
-            for idx, part in enumerate(parts):
-                part_dur = int(duration(part))
-                part_caption = f"{cc}\n\n📦 Part {idx+1} of {len(parts)}"
-                upload_msg = await m.reply_text(f"📤 Uploading Part {idx+1}/{len(parts)}...")
+        # Cleanup
+        if os.path.exists(filename):
+            os.remove(filename)
+        await reply.delete(True)
+        await reply1.delete(True)
+        if thumbnail and os.path.exists(thumbnail):
+            os.remove(thumbnail)
 
-                try:
-                    await bot.send_video(
-                        chat_id=m.chat.id,
-                        video=part,
-                        caption=part_caption,
-                        supports_streaming=True,
-                        thumb=thumbnail,
-                        duration=part_dur,
-                        progress=progress_bar,
-                        progress_args=(upload_msg, time.time())
-                    )
-                except:
-                    await bot.send_document(
-                        chat_id=m.chat.id,
-                        document=part,
-                        caption=part_caption,
-                        progress=progress_bar,
-                        progress_args=(upload_msg, time.time())
-                    )
-
-                await upload_msg.delete(True)
-                if os.path.exists(part):
-                    os.remove(part)
-
-            await reply.delete(True)
-            await notify_split.delete(True)
-            if os.path.exists(filename):
-                os.remove(filename)
-
-        if temp_thumb and os.path.exists(temp_thumb):
-            os.remove(temp_thumb)
+        return sent_message
 
     except Exception as err:
-        await m.reply_text(f"❌ Upload failed: {err}")
+        raise Exception(f"send_vid failed: {err}")
 
-# ==================== BOT HANDLERS ====================
+# ===== BOT HANDLERS =====
 
 @bot.on_message(filters.command("start"))
 async def start_handler(client, m: Message):
@@ -362,6 +303,7 @@ async def txt_handler(client, m: Message):
         return await m.reply_text("❌ Please set your token first using `/token your_token`")
     
     token = user_data[user_id]["token"]
+    b_name = user_data[user_id].get("batch_name", "Classplus Batch")
     
     editable = await m.reply_text("📥 Downloading file...")
     file_path = await m.download()
@@ -371,33 +313,36 @@ async def txt_handler(client, m: Message):
     
     os.remove(file_path)
     
-    # Parse links
-    lines = content.strip().split('\n')
-    links = []
+    # Parse links (same as original bot)
+    content = content.split("\n")
+    content = [line.strip() for line in content if line.strip()]
     
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if line.lower().startswith("thumbnail:"):
-            continue
-        if "http://" in line or "https://" in line:
-            if "https://" in line:
-                url_start = line.find("https://")
-            else:
-                url_start = line.find("http://")
-            
-            url = line[url_start:].strip()
-            name = line[:url_start].strip().rstrip(":- ").strip()
-            if not name:
-                name = f"File_{len(links)+1}"
-            
-            links.append({"name": name, "url": url})
+    links = []
+    for i in content:
+        if "://" in i:
+            if i.strip().startswith("Thumbnail:"):
+                continue
+            parts = i.split("://", 1)
+            if len(parts) == 2:
+                name = parts[0]
+                url = "://" + parts[1]
+                # Find the actual URL start
+                if "https" in name:
+                    name = name.split("https")[0]
+                    url = "https://" + parts[1]
+                elif "http" in name:
+                    name = name.split("http")[0]
+                    url = "http://" + parts[1]
+                name = name.rstrip(":- ").strip()
+                if not name:
+                    name = f"File_{len(links)+1}"
+                links.append([name, url])
     
     if not links:
         return await editable.edit("❌ No valid links found in the file.")
     
     user_data[user_id]["links"] = links
+    user_data[user_id]["b_name"] = b_name
     
     await editable.edit(
         f"✅ Found **{len(links)}** links!\n\n"
@@ -418,94 +363,143 @@ async def quality_handler(client, m: Message):
     if user_id not in user_data or "links" not in user_data[user_id]:
         return
 
-    quality = m.text.strip().lower()
+    raw_text2 = m.text.strip()
     links = user_data[user_id]["links"]
     token = user_data[user_id]["token"]
-    batch_name = user_data[user_id].get("batch_name", "Classplus Batch")
+    b_name = user_data[user_id].get("b_name", "Classplus Batch")
+    CR = CREDIT
+    channel_id = m.chat.id
     
-    # yt-dlp format
-    if quality == "worst":
+    # Build resolution format (same as original)
+    if raw_text2 == "worst":
         ytf = "worst"
-    elif quality.isdigit():
-        ytf = f"b[height<={quality}]/bv[height<={quality}]+ba/b/bv+ba"
+        res = "worst"
+    elif raw_text2.isdigit():
+        ytf = f"b[height<={raw_text2}]/bv[height<={raw_text2}]+ba/b/bv+ba"
+        res = f"{raw_text2}p"
     else:
         ytf = "best"
+        res = "best"
     
-    def get_caption(index, title, is_video=True):
-        icon = "🎞️" if is_video else "📄"
-        return f"""🏷️ Iɴᴅᴇx ID  : {str(index).zfill(3)}
-
-{icon}  Tɪᴛʟᴇ : {title}
-
-📚  𝗕ᴀᴛᴄʜ : {batch_name}
-
-🎓  Uᴘʟᴏᴀᴅ Bʏ : {CREDIT}"""
-             
-    await m.reply_text(f"🚀 Starting download of {len(links)} items at **{quality}** quality...")
+    await m.reply_text(f"🚀 Starting download of **{len(links)}** items at **{res}** quality...")
     
-    for i, item in enumerate(links, 1):
-        name = item.get('name', f'Video_{i}')
-        url = item.get('url', '')
+    count = 1
+    failed_count = 0
+    
+    for link_data in links:
+        name = sanitize_filename(link_data[0])
+        url = link_data[1].strip()
+        name1 = name[:50] if len(name) > 50 else name
+        link0 = url
         
-        if not url:
-            continue
-        
-        prog = await m.reply_text(f"📥 [{i}/{len(links)}] Processing: {name}")
+        try:
+            # Same caption format as original bot
+            cc = (
+                f"<b>🏷️ Iɴᴅᴇx ID  :</b> {str(count).zfill(3)}\n\n"
+                f"<b>🎞️  Tɪᴛʟᴇ :</b> {name1} \n\n"
+                f"<blockquote>📚  𝗕ᴀᴛᴄʜ : {b_name}</blockquote>"
+                f"\n\n<b>🎓  Uᴘʟᴏᴀᴅ Bʏ : {CR}</b>"
+            )
+            cc1 = (
+                f"<b>🏷️ Iɴᴅᴇx ID :</b> {str(count).zfill(3)}\n\n"
+                f"<b>📑  Tɪᴛʟᴇ :</b> {name1} \n\n"
+                f"<blockquote>📚  𝗕ᴀᴛᴄʜ : {b_name}</blockquote>"
+                f"\n\n<b>🎓  Uᴘʟᴏᴀᴅ Bʏ : {CR}</b>"
+            )
             
-        # PDF Download
-        if ".pdf" in url.lower():
-            file_name = f"{sanitize_filename(name)}.pdf"
-            try:
-                resp = requests.get(url, timeout=120)
-                with open(file_name, "wb") as f:
-                    f.write(resp.content)
-                await m.reply_document(file_name, caption=get_caption(i, name, is_video=False))
-                os.remove(file_name)
-                await prog.delete()
-            except Exception as e:
-                await prog.edit(f"❌ Error downloading PDF: {str(e)}")
+            # PDF Download
+            if ".pdf" in url:
+                try:
+                    cmd = f'yt-dlp -o "{name}.pdf" "{url}"'
+                    download_cmd = f"{cmd} -R 25 --fragment-retries 25"
+                    os.system(download_cmd)
+                    await bot.send_document(chat_id=channel_id, document=f'{name}.pdf', caption=cc1)
+                    count += 1
+                    os.remove(f'{name}.pdf')
+                except FloodWait as e:
+                    await m.reply_text(str(e))
+                    time.sleep(e.x)
+                    continue
             
-        # Video Download (using AANT API for signing)
-        elif "m3u8" in url or "mpd" in url or "classplusapp" in url:
-            url_norm = url.replace("https://cpvod.testbook.com/", "https://media-cdn.classplusapp.com/drm/")
-            api_call = f"https://cp-api-by-aman.vercel.app/AANT?url={url_norm}&token={token}"
-            
-            try:
-                resp = requests.get(api_call, timeout=30)
-                if resp.status_code == 200:
+            # Classplus Video - use AANT API with token
+            elif any(x in url for x in ["cpvod.testbook.com", "classplusapp.com", "media-cdn.classplusapp"]):
+                url_norm = url.replace("https://cpvod.testbook.com/", "https://media-cdn.classplusapp.com/drm/")
+                api_url_call = f"https://cp-api-by-aman.vercel.app/AANT?url={url_norm}&token={token}"
+                
+                try:
+                    resp = requests.get(api_url_call, timeout=30)
                     data = resp.json()
-                    signed_url = data.get('url') or data.get('MPD') or data.get('m3u8')
-                    if signed_url:
-                        file_name = f"{sanitize_filename(name)}.mp4"
-                        
-                        # Download with aria2c (fast!)
-                        cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32" "{signed_url}"'
-                        downloaded_file = await download_video(signed_url, f'yt-dlp -f "{ytf}" -o "{file_name}"', file_name)
-                        
-                        if os.path.exists(downloaded_file):
-                            await send_vid(client, m, get_caption(i, name, is_video=True), downloaded_file, "/d", name, prog)
-                        else:
-                            await prog.edit(f"❌ Failed to download: {name}")
+                    
+                    # Get the signed URL
+                    if isinstance(data, dict) and "url" in data:
+                        signed_url = data.get("url")
+                    elif isinstance(data, dict) and "MPD" in data:
+                        signed_url = data.get("MPD")
                     else:
-                        await prog.edit(f"⚠️ API did not return URL for: {name}")
+                        signed_url = url
+                    
+                    Show = f"<i><b>📥 Fast Video Downloading</b></i>\n<blockquote><b>{str(count).zfill(3)}) {name1}</b></blockquote>"
+                    prog = await bot.send_message(channel_id, Show, disable_web_page_preview=True)
+                    
+                    cmd = f'yt-dlp -f "{ytf}" -o "{name}.mp4" "{signed_url}"'
+                    filename = await download_video(signed_url, cmd, f"{name}.mp4")
+                    
+                    if os.path.exists(filename):
+                        await send_vid(bot, m, cc, filename, "/d", name, prog, channel_id)
+                        count += 1
+                    else:
+                        await bot.send_message(channel_id, f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n**Url** =>> {link0}', disable_web_page_preview=True)
+                        failed_count += 1
+                        count += 1
+                        
+                except Exception as e:
+                    await bot.send_message(channel_id, f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n\n<blockquote><i><b>Failed Reason: {str(e)}</b></i></blockquote>', disable_web_page_preview=True)
+                    count += 1
+                    failed_count += 1
+                    continue
+            
+            # Other videos
+            else:
+                Show = f"<i><b>📥 Fast Video Downloading</b></i>\n<blockquote><b>{str(count).zfill(3)}) {name1}</b></blockquote>"
+                prog = await bot.send_message(channel_id, Show, disable_web_page_preview=True)
+                
+                cmd = f'yt-dlp -f "{ytf}" -o "{name}.mp4" "{url}"'
+                filename = await download_video(url, cmd, f"{name}.mp4")
+                
+                if os.path.exists(filename):
+                    await send_vid(bot, m, cc, filename, "/d", name, prog, channel_id)
+                    count += 1
                 else:
-                    await prog.edit(f"⚠️ API error ({resp.status_code}): {name}")
-            except Exception as e:
-                await prog.edit(f"❌ Error: {str(e)}")
-        
-        # Direct video URL
-        elif any(ext in url.lower() for ext in ['.mp4', '.mkv', '.webm']):
-            file_name = f"{sanitize_filename(name)}.mp4"
-            try:
-                downloaded_file = await download_video(url, f'yt-dlp -f "{ytf}" -o "{file_name}"', file_name)
-                if os.path.exists(downloaded_file):
-                    await send_vid(client, m, get_caption(i, name, is_video=True), downloaded_file, "/d", name, prog)
-            except Exception as e:
-                await prog.edit(f"❌ Error: {str(e)}")
+                    await bot.send_message(channel_id, f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n**Url** =>> {link0}', disable_web_page_preview=True)
+                    failed_count += 1
+                    count += 1
+                
+        except Exception as e:
+            await bot.send_message(channel_id, f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n\n<blockquote><i><b>Failed Reason: {str(e)}</b></i></blockquote>', disable_web_page_preview=True)
+            count += 1
+            failed_count += 1
+            continue
 
+    # Clear session
     del user_data[user_id]["links"]
-    await m.reply_text("🎯 **All downloads complete!**")
-
+    
+    # Final summary (same format as original)
+    success_count = len(links) - failed_count
+    await bot.send_message(
+        channel_id,
+        (
+            "<b>📬 ᴘʀᴏᴄᴇꜱꜱ ᴄᴏᴍᴘʟᴇᴛᴇᴅ</b>\n\n"
+            "<blockquote><b>📚 ʙᴀᴛᴄʜ ɴᴀᴍᴇ :</b> "
+            f"{b_name}</blockquote>\n"
+            
+            "╭────────────────\n"
+            f"├ 🖇️ ᴛᴏᴛᴀʟ ᴜʀʟꜱ : <code>{len(links)}</code>\n"
+            f"├ ✅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ : <code>{success_count}</code>\n"
+            f"├ ❌ ꜰᴀɪʟᴇᴅ : <code>{failed_count}</code>\n"
+            "╰────────────────\n\n"
+            f"<b>🎓 Uᴘʟᴏᴀᴅᴇᴅ Bʏ : {CR}</b>"
+        )
+    )
 
 def run_flask():
     port = int(os.environ.get('PORT', 8000))
