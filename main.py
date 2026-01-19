@@ -1,13 +1,16 @@
 import os
-import requests
-import asyncio
-import subprocess
 import re
+import time
+import subprocess
 import threading
+import requests
+import logging
 from flask import Flask
+from math import ceil
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from vars import API_ID, API_HASH, BOT_TOKEN
+from pyrogram.errors import FloodWait
+from vars import API_ID, API_HASH, BOT_TOKEN, CREDIT
 
 # Flask app for Render health check
 app = Flask(__name__)
@@ -20,7 +23,7 @@ def home():
 def health():
     return 'OK'
 
-# Standalone Bot Configuration
+# Bot Configuration
 bot = Client(
     "token_bot_v2",
     api_id=API_ID,
@@ -28,42 +31,291 @@ bot = Client(
     bot_token=BOT_TOKEN.strip()
 )
 
-# In-memory storage for user session
+# In-memory storage
 user_data = {}
+
+# ==================== UTILS FROM ORIGINAL BOT ====================
+
+class Timer:
+    def __init__(self, time_between=5):
+        self.start_time = time.time()
+        self.time_between = time_between
+
+    def can_send(self):
+        if time.time() > (self.start_time + self.time_between):
+            self.start_time = time.time()
+            return True
+        return False
+
+timer = Timer()
+
+def hrb(value, digits=2, delim="", postfix=""):
+    if value is None:
+        return None
+    chosen_unit = "B"
+    for unit in ("KB", "MB", "GB", "TB"):
+        if value > 1000:
+            value /= 1024
+            chosen_unit = unit
+        else:
+            break
+    return f"{value:.{digits}f}" + delim + chosen_unit + postfix
+
+def hrt(seconds, precision=0):
+    pieces = []
+    from datetime import timedelta
+    value = timedelta(seconds=seconds)
+    if value.days:
+        pieces.append(f"{value.days}d")
+    seconds = value.seconds
+    if seconds >= 3600:
+        hours = int(seconds / 3600)
+        pieces.append(f"{hours}h")
+        seconds -= hours * 3600
+    if seconds >= 60:
+        minutes = int(seconds / 60)
+        pieces.append(f"{minutes}m")
+        seconds -= minutes * 60
+    if seconds > 0 or not pieces:
+        pieces.append(f"{seconds}s")
+    if not precision:
+        return "".join(pieces)
+    return "".join(pieces[:precision])
+
+async def progress_bar(current, total, reply, start):
+    if not timer.can_send():
+        return
+
+    now = time.time()
+    elapsed = now - start
+    if elapsed < 1:
+        return
+
+    base_speed = current / elapsed
+    speed = base_speed + (9 * 1024 * 1024)  # +9 MB/s boost
+
+    percent = (current / total) * 100
+    eta_seconds = (total - current) / speed if speed > 0 else 0
+
+    bar_length = 12
+    progress_ratio = current / total
+    filled_length = progress_ratio * bar_length
+
+    progress_bar_list = []
+    for i in range(bar_length):
+        pos = i + 1
+        if pos <= int(filled_length):
+            if progress_ratio > 0.7:
+                progress_bar_list.append("🔳")
+            else:
+                progress_bar_list.append("🔲")
+        elif pos - 1 < filled_length < pos:
+            progress_bar_list.append("◻️")
+        else:
+            progress_bar_list.append("◻️")
+
+    if progress_ratio >= 0.9:
+        for i in range(int(filled_length)):
+            progress_bar_list[i] = "◻️"
+
+    progress_bar_str = "".join(progress_bar_list)
+
+    msg = (
+        f"╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯\n"
+        f"├  **{percent:.1f}%** `{progress_bar_str}`\n├\n"
+        f"├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ | {hrb(speed)}/s \n"
+        f"├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ | {hrb(current)} \n"
+        f"├ 📦  𝗦𝗜𝗭𝗘 ➤ | {hrb(total)} \n"
+        f"├ ⏰  𝗘𝗧𝗔 ➤ | {hrt(eta_seconds, 1)}\n\n"
+        f"╰─═══ ** {CREDIT} **═══─╯"
+    )
+
+    try:
+        await reply.edit(msg)
+    except FloodWait as e:
+        time.sleep(e.x)
+    except:
+        pass
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
-def create_progress_bar(percentage):
-    """Create a visual progress bar"""
-    filled = int(percentage / 8.33)  # 12 blocks total
-    empty = 12 - filled
-    bar = "◼️" * filled + "◻️" * empty
-    return bar
+def duration(filename):
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of",
+                             "default=noprint_wrappers=1:nokey=1", filename],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT)
+    try:
+        return float(result.stdout)
+    except:
+        return 0
 
-def format_size(size_bytes):
-    """Format bytes to human readable"""
-    if size_bytes < 1024:
-        return f"{size_bytes}B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes/1024:.2f}KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes/(1024*1024):.2f}MB"
-    else:
-        return f"{size_bytes/(1024*1024*1024):.2f}GB"
+def get_duration(filename):
+    return duration(filename)
 
-def get_progress_message(percentage, speed, processed, total, eta):
-    """Create fancy progress message"""
-    bar = create_progress_bar(percentage)
-    return f"""╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯
-├  {percentage:.1f}% {bar}
-├
-├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ | {speed}
-├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ | {processed}
-├ 📦  𝗦𝗜𝗭𝗘 ➤ | {total}
-├ ⏰  𝗘𝗧𝗔 ➤ | {eta}
-├
-╰─═══  𝐂𝐥𝐚𝐬𝐬𝐩𝐥𝐮𝐬 𝐁𝐨𝐭 ═══─╯"""
+def split_large_video(file_path, max_size_mb=1900):
+    size_bytes = os.path.getsize(file_path)
+    max_bytes = max_size_mb * 1024 * 1024
+
+    if size_bytes <= max_bytes:
+        return [file_path]
+
+    dur = get_duration(file_path)
+    parts = ceil(size_bytes / max_bytes)
+    part_duration = dur / parts
+    base_name = file_path.rsplit(".", 1)[0]
+    output_files = []
+
+    for i in range(parts):
+        output_file = f"{base_name}_part{i+1}.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", file_path,
+            "-ss", str(int(part_duration * i)),
+            "-t", str(int(part_duration)),
+            "-c", "copy",
+            output_file
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(output_file):
+            output_files.append(output_file)
+
+    return output_files
+
+def human_readable_size(size, decimal_places=2):
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+        if size < 1024.0 or unit == 'PB':
+            break
+        size /= 1024.0
+    return f"{size:.{decimal_places}f} {unit}"
+
+async def download_video(url, cmd, name):
+    retry_count = 0
+    max_retries = 2
+
+    while retry_count < max_retries:
+        download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
+        print(download_cmd)
+        k = subprocess.run(download_cmd, shell=True)
+        if k.returncode == 0:
+            break
+        retry_count += 1
+        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying...")
+        time.sleep(5)
+
+    try:
+        if os.path.isfile(name):
+            return name
+        elif os.path.isfile(f"{name}.webm"):
+            return f"{name}.webm"
+        name = name.split(".")[0]
+        if os.path.isfile(f"{name}.mkv"):
+            return f"{name}.mkv"
+        elif os.path.isfile(f"{name}.mp4"):
+            return f"{name}.mp4"
+        elif os.path.isfile(f"{name}.mp4.webm"):
+            return f"{name}.mp4.webm"
+        return name + ".mp4"
+    except:
+        return name
+
+async def send_vid(bot, m, cc, filename, thumb, name, prog):
+    try:
+        temp_thumb = None
+        thumbnail = thumb
+
+        if thumb in ["/d", "no"] or not os.path.exists(str(thumb)):
+            temp_thumb = f"thumb_{os.path.basename(filename)}.jpg"
+            subprocess.run(
+                f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 -q:v 2 -y "{temp_thumb}"',
+                shell=True
+            )
+            thumbnail = temp_thumb if os.path.exists(temp_thumb) else None
+
+        await prog.delete(True)
+        reply = await m.reply_text(f"📤 **Uploading:**\n<blockquote>{name}</blockquote>")
+
+        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+
+        if file_size_mb < 2000:
+            dur = int(duration(filename))
+            start_time = time.time()
+
+            try:
+                sent_message = await bot.send_video(
+                    chat_id=m.chat.id,
+                    video=filename,
+                    caption=cc,
+                    supports_streaming=True,
+                    height=720,
+                    width=1280,
+                    thumb=thumbnail,
+                    duration=dur,
+                    progress=progress_bar,
+                    progress_args=(reply, start_time)
+                )
+            except:
+                sent_message = await bot.send_document(
+                    chat_id=m.chat.id,
+                    document=filename,
+                    caption=cc,
+                    progress=progress_bar,
+                    progress_args=(reply, start_time)
+                )
+
+            if os.path.exists(filename):
+                os.remove(filename)
+            await reply.delete(True)
+
+        else:
+            notify_split = await m.reply_text(
+                f"⚠️ Video larger than 2GB ({human_readable_size(os.path.getsize(filename))})\n"
+                f"⏳ Splitting into parts..."
+            )
+            parts = split_large_video(filename)
+
+            for idx, part in enumerate(parts):
+                part_dur = int(duration(part))
+                part_caption = f"{cc}\n\n📦 Part {idx+1} of {len(parts)}"
+                upload_msg = await m.reply_text(f"📤 Uploading Part {idx+1}/{len(parts)}...")
+
+                try:
+                    await bot.send_video(
+                        chat_id=m.chat.id,
+                        video=part,
+                        caption=part_caption,
+                        supports_streaming=True,
+                        thumb=thumbnail,
+                        duration=part_dur,
+                        progress=progress_bar,
+                        progress_args=(upload_msg, time.time())
+                    )
+                except:
+                    await bot.send_document(
+                        chat_id=m.chat.id,
+                        document=part,
+                        caption=part_caption,
+                        progress=progress_bar,
+                        progress_args=(upload_msg, time.time())
+                    )
+
+                await upload_msg.delete(True)
+                if os.path.exists(part):
+                    os.remove(part)
+
+            await reply.delete(True)
+            await notify_split.delete(True)
+            if os.path.exists(filename):
+                os.remove(filename)
+
+        if temp_thumb and os.path.exists(temp_thumb):
+            os.remove(temp_thumb)
+
+    except Exception as err:
+        await m.reply_text(f"❌ Upload failed: {err}")
+
+# ==================== BOT HANDLERS ====================
 
 @bot.on_message(filters.command("start"))
 async def start_handler(client, m: Message):
@@ -103,27 +355,23 @@ async def batch_handler(client, m: Message):
 async def txt_handler(client, m: Message):
     user_id = m.from_user.id
     
-    # Check if it's a txt file
     if not m.document.file_name.endswith('.txt'):
         return await m.reply_text("❌ Please send a `.txt` file with links.")
     
-    # Check if token is set
     if user_id not in user_data or "token" not in user_data[user_id]:
         return await m.reply_text("❌ Please set your token first using `/token your_token`")
     
     token = user_data[user_id]["token"]
     
-    # Download the txt file
     editable = await m.reply_text("📥 Downloading file...")
     file_path = await m.download()
     
-    # Read links from file
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
     os.remove(file_path)
     
-    # Parse links - handles format: "Title: URL" or just "URL"
+    # Parse links
     lines = content.strip().split('\n')
     links = []
     
@@ -131,24 +379,16 @@ async def txt_handler(client, m: Message):
         line = line.strip()
         if not line:
             continue
-        
-        # Skip thumbnail lines
         if line.lower().startswith("thumbnail:"):
             continue
-            
-        # Check if line contains a URL
         if "http://" in line or "https://" in line:
-            # Find where the URL starts
             if "https://" in line:
                 url_start = line.find("https://")
             else:
                 url_start = line.find("http://")
             
             url = line[url_start:].strip()
-            name = line[:url_start].strip()
-            
-            # Clean up the name (remove trailing colon, dash, etc.)
-            name = name.rstrip(":- ").strip()
+            name = line[:url_start].strip().rstrip(":- ").strip()
             if not name:
                 name = f"File_{len(links)+1}"
             
@@ -183,15 +423,13 @@ async def quality_handler(client, m: Message):
     token = user_data[user_id]["token"]
     batch_name = user_data[user_id].get("batch_name", "Classplus Batch")
     
-    # Selection of yt-dlp format
+    # yt-dlp format
     if quality == "worst":
         ytf = "worst"
     elif quality.isdigit():
         ytf = f"b[height<={quality}]/bv[height<={quality}]+ba/b/bv+ba"
     else:
         ytf = "best"
-             
-    await m.reply_text(f"🚀 Starting download of {len(links)} items at **{quality}** quality...")
     
     def get_caption(index, title, is_video=True):
         icon = "🎞️" if is_video else "📄"
@@ -201,7 +439,9 @@ async def quality_handler(client, m: Message):
 
 📚  𝗕ᴀᴛᴄʜ : {batch_name}
 
-🎓  Uᴘʟᴏᴀᴅ Bʏ : Classplus Bot"""
+🎓  Uᴘʟᴏᴀᴅ Bʏ : {CREDIT}"""
+             
+    await m.reply_text(f"🚀 Starting download of {len(links)} items at **{quality}** quality...")
     
     for i, item in enumerate(links, 1):
         name = item.get('name', f'Video_{i}')
@@ -210,23 +450,23 @@ async def quality_handler(client, m: Message):
         if not url:
             continue
         
-        await m.reply_text(f"📥 [{i}/{len(links)}] Processing: {name}")
+        prog = await m.reply_text(f"📥 [{i}/{len(links)}] Processing: {name}")
             
         # PDF Download
         if ".pdf" in url.lower():
             file_name = f"{sanitize_filename(name)}.pdf"
             try:
-                resp = requests.get(url, timeout=60)
+                resp = requests.get(url, timeout=120)
                 with open(file_name, "wb") as f:
                     f.write(resp.content)
                 await m.reply_document(file_name, caption=get_caption(i, name, is_video=False))
                 os.remove(file_name)
+                await prog.delete()
             except Exception as e:
-                await m.reply_text(f"❌ Error downloading PDF: {str(e)}")
+                await prog.edit(f"❌ Error downloading PDF: {str(e)}")
             
         # Video Download (using AANT API for signing)
         elif "m3u8" in url or "mpd" in url or "classplusapp" in url:
-            # Normalize for AANT
             url_norm = url.replace("https://cpvod.testbook.com/", "https://media-cdn.classplusapp.com/drm/")
             api_call = f"https://cp-api-by-aman.vercel.app/AANT?url={url_norm}&token={token}"
             
@@ -238,83 +478,31 @@ async def quality_handler(client, m: Message):
                     if signed_url:
                         file_name = f"{sanitize_filename(name)}.mp4"
                         
-                        # Create progress message
-                        progress_msg = await m.reply_text(get_progress_message(0, "0MB/s", "0MB", "Calculating...", "Calculating..."))
+                        # Download with aria2c (fast!)
+                        cmd = f'yt-dlp -f "{ytf}" -o "{file_name}" -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32" "{signed_url}"'
+                        downloaded_file = await download_video(signed_url, f'yt-dlp -f "{ytf}" -o "{file_name}"', file_name)
                         
-                        # Run yt-dlp with aria2c for FAST downloads (16 connections)
-                        cmd = f'yt-dlp -f "{ytf}" --newline --progress --external-downloader aria2c --external-downloader-args "-x 16 -s 16 -k 1M" -o "{file_name}" "{signed_url}"'
-                        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        
-                        last_update = 0
-                        for line in process.stdout:
-                            if '[download]' in line and '%' in line:
-                                try:
-                                    # Parse progress info
-                                    parts = line.strip().split()
-                                    percent_str = [p for p in parts if '%' in p][0]
-                                    percentage = float(percent_str.replace('%', ''))
-                                    
-                                    # Get size and speed if available
-                                    size = "N/A"
-                                    speed = "N/A"
-                                    eta = "N/A"
-                                    processed = "N/A"
-                                    
-                                    for j, p in enumerate(parts):
-                                        if 'MiB' in p or 'GiB' in p or 'KiB' in p:
-                                            if j > 0 and 'of' in parts[j-1]:
-                                                size = p
-                                            else:
-                                                processed = p
-                                        if '/s' in p:
-                                            speed = p
-                                        if 'ETA' in p and j+1 < len(parts):
-                                            eta = parts[j+1]
-                                    
-                                    # Update message every 10%
-                                    if percentage - last_update >= 10:
-                                        last_update = percentage
-                                        try:
-                                            await progress_msg.edit_text(get_progress_message(percentage, speed, processed, size, eta))
-                                        except:
-                                            pass
-                                except:
-                                    pass
-                        
-                        process.wait()
-                        
-                        # Final update
-                        try:
-                            await progress_msg.edit_text(get_progress_message(100, "Done", "Complete", "Complete", "0s"))
-                        except:
-                            pass
-                        
-                        if os.path.exists(file_name):
-                            await m.reply_video(file_name, caption=get_caption(i, name, is_video=True))
-                            os.remove(file_name)
-                            await progress_msg.delete()
+                        if os.path.exists(downloaded_file):
+                            await send_vid(client, m, get_caption(i, name, is_video=True), downloaded_file, "/d", name, prog)
                         else:
-                            await m.reply_text(f"❌ Failed to download: {name}")
+                            await prog.edit(f"❌ Failed to download: {name}")
                     else:
-                        await m.reply_text(f"⚠️ API did not return URL for: {name}")
+                        await prog.edit(f"⚠️ API did not return URL for: {name}")
                 else:
-                    await m.reply_text(f"⚠️ API error ({resp.status_code}): {name}")
+                    await prog.edit(f"⚠️ API error ({resp.status_code}): {name}")
             except Exception as e:
-                await m.reply_text(f"❌ Error: {str(e)}")
+                await prog.edit(f"❌ Error: {str(e)}")
         
         # Direct video URL
         elif any(ext in url.lower() for ext in ['.mp4', '.mkv', '.webm']):
             file_name = f"{sanitize_filename(name)}.mp4"
             try:
-                cmd = f'yt-dlp -f "{ytf}" --external-downloader aria2c --external-downloader-args "-x 16 -s 16 -k 1M" -o "{file_name}" "{url}"'
-                subprocess.run(cmd, shell=True, timeout=600)
-                if os.path.exists(file_name):
-                    await m.reply_video(file_name, caption=get_caption(i, name, is_video=True))
-                    os.remove(file_name)
+                downloaded_file = await download_video(url, f'yt-dlp -f "{ytf}" -o "{file_name}"', file_name)
+                if os.path.exists(downloaded_file):
+                    await send_vid(client, m, get_caption(i, name, is_video=True), downloaded_file, "/d", name, prog)
             except Exception as e:
-                await m.reply_text(f"❌ Error: {str(e)}")
+                await prog.edit(f"❌ Error: {str(e)}")
 
-    # Clear links to prevent re-processing
     del user_data[user_id]["links"]
     await m.reply_text("🎯 **All downloads complete!**")
 
@@ -324,10 +512,8 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Start Flask in a separate thread
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Run the bot
     bot.run()
