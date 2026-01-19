@@ -78,19 +78,36 @@ async def txt_handler(client, m: Message):
     
     os.remove(file_path)
     
-    # Parse links
+    # Parse links - handles format: "Title: URL" or just "URL"
     lines = content.strip().split('\n')
     links = []
-    current_name = "Untitled"
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        if line.startswith("Name:"):
-            current_name = line.replace("Name:", "").strip()
-        elif line.startswith("http") or line.startswith("https"):
-            links.append({"name": current_name, "url": line})
+        
+        # Skip thumbnail lines
+        if line.lower().startswith("thumbnail:"):
+            continue
+            
+        # Check if line contains a URL
+        if "http://" in line or "https://" in line:
+            # Find where the URL starts
+            if "https://" in line:
+                url_start = line.find("https://")
+            else:
+                url_start = line.find("http://")
+            
+            url = line[url_start:].strip()
+            name = line[:url_start].strip()
+            
+            # Clean up the name (remove trailing colon, dash, etc.)
+            name = name.rstrip(":- ").strip()
+            if not name:
+                name = f"File_{len(links)+1}"
+            
+            links.append({"name": name, "url": url})
     
     if not links:
         return await editable.edit("❌ No valid links found in the file.")
